@@ -1,0 +1,280 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+from io import BytesIO
+
+# ---------- Configuración general ----------
+st.set_page_config(
+    page_title="Inventario de Felipe",
+    page_icon="📦",
+    layout="wide"
+)
+
+# ---------- Estilos ----------
+PRIMARY = "#1f6feb"
+ACCENT = "#3fb950"
+WARNING = "#d29922"
+DANGER = "#f85149"
+
+st.markdown(
+    f"""
+    <style>
+    .stApp {{
+        background-color: #0d1117;
+        color: #c9d1d9;
+    }}
+    .block-container {{
+        padding-top: 1rem;
+        padding-bottom: 2rem;
+    }}
+    h1, h2, h3 {{
+        color: #ffffff;
+    }}
+    .metric-small {{
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        padding: 12px;
+        margin: 4px 0;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# ---------- Estado inicial ----------
+COLUMNS = ["Producto", "Código", "Categoría", "Stock", "Precio"]
+
+def init_state():
+    if "df" not in st.session_state:
+        st.session_state.df = pd.DataFrame(columns=COLUMNS)
+    if "low_stock_threshold" not in st.session_state:
+        st.session_state.low_stock_threshold = 5
+
+init_state()
+
+# ---------- Utilidades ----------
+def add_product(nombre, codigo, categoria, stock, precio):
+    df = st.session_state.df.copy()
+    if codigo and (codigo in df["Código"].values):
+        st.warning("Ya existe un producto con ese código. Usa uno diferente.")
+        return False
+    if nombre in df["Producto"].values and (not codigo):
+        st.warning("Ya existe un producto con ese nombre. Considera usar un código único.")
+        return False
+    new_row = pd.DataFrame([{
+        "Producto": nombre.strip(),
+        "Código": (codigo or "").strip(),
+        "Categoría": (categoria or "").strip(),
+        "Stock": int(stock),
+        "Precio": float(precio)
+    }])
+    st.session_state.df = pd.concat([df, new_row], ignore_index=True)
+    return True
+
+def register_sale(producto_o_codigo, cantidad):
+    df = st.session_state.df.copy()
+    # Buscar por código primero, si no, por nombre
+    idx = df.index[df["Código"] == producto_o_codigo]
+    if len(idx) == 0:
+        idx = df.index[df["Producto"] == producto_o_codigo]
+    if len(idx) == 0:
+        st.error("Producto no encontrado.")
+        return False
+    idx = idx[0]
+    stock_actual = int(df.at[idx, "Stock"])
+    if cantidad <= 0:
+        st.error("La cantidad vendida debe ser mayor a 0.")
+        return False
+    if stock_actual < cantidad:
+        st.warning(f"Stock insuficiente. Disponible: {stock_actual}, solicitado: {cantidad}.")
+        return False
+    df.at[idx, "Stock"] = stock_actual - cantidad
+    st.session_state.df = df
+    return True
+
+def df_filtered(search):
+    df = st.session_state.df
+    if not search:
+        return df
+    mask = np.column_stack([
+        df[col].astype(str).str.contains(search, case=False, na=False)
+        for col in ["Producto", "Código", "Categoría"]
+    ]).any(axis=1)
+    return df[mask]
+
+def download_excel(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df.to_excel(writer, sheet_name="Inventario", index=False)
+    return output.getvalue()
+
+# ---------- Header ----------
+st.title("📦 Inventario de Felipe")
+st.caption("Registra productos, ventas, y visualiza tu stock con dashboard y exportación.")
+
+# ---------- Barra superior ----------
+with st.sidebar:
+    st.header("Configuración")
+    st.session_state.low_stock_threshold = st.number_input(
+        "Umbral de stock bajo",
+        min_value=0, max_value=9999, value=st.session_state.low_stock_threshold, step=1
+    )
+    st.divider()
+
+    st.subheader("Guardar / Cargar")
+    # Descargar CSV
+    st.download_button(
+        "Descargar CSV",
+        data=st.session_state.df.to_csv(index=False).encode("utf-8"),
+        file_name="inventario.csv",
+        mime="text/csv"
+    )
+    # Descargar Excel
+    st.download_button(
+        "Descargar Excel",
+        data=download_excel(st.session_state.df),
+        file_name="inventario.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    # Cargar archivo
+    uploaded = st.file_uploader("Cargar inventario (CSV/Excel)", type=["csv", "xlsx"])
+    if uploaded is not None:
+        try:
+            if uploaded.name.lower().endswith(".csv"):
+                loaded_df = pd.read_csv(uploaded)
+            else:
+                loaded_df = pd.read_excel(uploaded)
+            # Normalizar columnas
+            loaded_df = loaded_df.rename(columns={
+                "producto": "Producto", "codigo": "Código", "categoria": "Categoría",
+                "stock": "Stock", "precio": "Precio"
+            })
+            loaded_df = loaded_df.reindex(columns=COLUMNS).fillna({"Código": "", "Categoría": ""})
+            loaded_df["Stock"] = loaded_df["Stock"].astype(int)
+            loaded_df["Precio"] = loaded_df["Precio"].astype(float)
+            st.session_state.df = loaded_df
+            st.success("Inventario cargado correctamente.")
+        except Exception as e:
+            st.error(f"Error al cargar el archivo: {e}")
+
+# ---------- Tabs principales ----------
+tab_inventario, tab_ventas, tab_dashboard = st.tabs(["➕ Inventario", "🧾 Ventas", "📊 Dashboard"])
+
+# ---------- Tab Inventario ----------
+with tab_inventario:
+    st.subheader("Agregar productos")
+    col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 1.5, 1.5])
+    with col1:
+        nombre = st.text_input("Nombre del producto")
+    with col2:
+        codigo = st.text_input("Código (opcional)")
+    with col3:
+        categoria = st.text_input("Categoría (opcional)")
+    with col4:
+        stock = st.number_input("Stock inicial", min_value=0, value=0, step=1)
+    with col5:
+        precio = st.number_input("Precio unitario", min_value=0.0, value=0.0, step=100.0)
+
+    add_btn = st.button("Agregar producto", type="primary")
+    if add_btn:
+        if not nombre:
+            st.error("Debes ingresar un nombre de producto.")
+        else:
+            ok = add_product(nombre, codigo, categoria, stock, precio)
+            if ok:
+                st.success(f"Producto agregado: {nombre}")
+            else:
+                st.stop()
+
+    st.divider()
+    st.subheader("Inventario actual")
+    search = st.text_input("Buscar por nombre, código o categoría")
+    df_view = df_filtered(search)
+    st.dataframe(df_view, use_container_width=True, hide_index=True)
+
+    # Edición rápida de stock/precio
+    st.markdown("#### Edición rápida")
+    if not st.session_state.df.empty:
+        colA, colB, colC = st.columns([2, 1, 1])
+        with colA:
+            prod_sel = st.selectbox("Producto", st.session_state.df["Producto"].tolist())
+        with colB:
+            new_stock = st.number_input("Nuevo stock", min_value=0, step=1, value=int(
+                st.session_state.df.loc[st.session_state.df["Producto"] == prod_sel, "Stock"].iloc[0]
+            ))
+        with colC:
+            new_price = st.number_input("Nuevo precio", min_value=0.0, step=100.0, value=float(
+                st.session_state.df.loc[st.session_state.df["Producto"] == prod_sel, "Precio"].iloc[0]
+            ))
+        if st.button("Actualizar datos", help="Actualiza stock y precio del producto seleccionado"):
+            i = st.session_state.df.index[st.session_state.df["Producto"] == prod_sel][0]
+            st.session_state.df.at[i, "Stock"] = int(new_stock)
+            st.session_state.df.at[i, "Precio"] = float(new_price)
+            st.success("Datos actualizados.")
+
+# ---------- Tab Ventas ----------
+with tab_ventas:
+    st.subheader("Registrar venta")
+    if st.session_state.df.empty:
+        st.info("No hay productos. Agrega alguno en la pestaña Inventario.")
+    else:
+        col1, col2, col3 = st.columns([2, 1, 1])
+        opciones = (
+            st.session_state.df["Código"].replace("", np.nan).dropna().tolist()
+            + st.session_state.df["Producto"].tolist()
+        )
+        with col1:
+            producto_o_codigo = st.selectbox("Producto o Código", opciones)
+        with col2:
+            cantidad = st.number_input("Cantidad vendida", min_value=1, value=1, step=1)
+        with col3:
+            st.write("")  # spacer
+            vender = st.button("Registrar venta", type="secondary")
+        if vender:
+            ok = register_sale(producto_o_codigo, int(cantidad))
+            if ok:
+                st.success("Venta registrada y stock actualizado.")
+            else:
+                st.stop()
+
+    st.divider()
+    # Alertas de stock bajo
+    st.subheader("Alertas de stock bajo")
+    umbral = st.session_state.low_stock_threshold
+    low_df = st.session_state.df[st.session_state.df["Stock"] <= umbral]
+    if low_df.empty:
+        st.markdown("✅ No hay productos con stock bajo.")
+    else:
+        st.warning(f"Productos con stock ≤ {umbral}")
+        st.dataframe(low_df, use_container_width=True, hide_index=True)
+
+# ---------- Tab Dashboard ----------
+with tab_dashboard:
+    st.subheader("Resumen y gráficos")
+    df = st.session_state.df.copy()
+    if df.empty:
+        st.info("No hay datos para mostrar.")
+    else:
+        # KPIs
+        total_items = int(df["Stock"].sum())
+        total_productos = int(len(df))
+        valor_inventario = float((df["Stock"] * df["Precio"]).sum())
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("Unidades totales", total_items)
+        with c2:
+            st.metric("Productos distintos", total_productos)
+        with c3:
+            st.metric("Valor del inventario", f"${valor_inventario:,.0f}")
+
+        st.divider()
+        st.subheader("Stock por producto")
+        chart_df = df.set_index("Producto")["Stock"]
+        st.bar_chart(chart_df, height=380, use_container_width=True)
+
+        st.subheader("Valor por producto")
+        valor_df = df.assign(Valor=df["Stock"] * df["Precio"]).set_index("Producto")["Valor"]
+        st.bar_chart(valor_df, height=380, use_container_width=True)
+
+st.caption("Tip: Usa la barra lateral para descargar y cargar tu inventario.")
